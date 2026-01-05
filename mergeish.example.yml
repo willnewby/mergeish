@@ -1,0 +1,19 @@
+# mergeish.yml - Configuration for managing multiple git repos as a monorepo
+#
+# Copy this file to mergeish.yml and customize for your workspace.
+
+repos:
+  # List of repositories to manage
+  - url: git@github.com:org/repo-a.git
+    path: services/repo-a        # local path relative to workspace root
+
+  - url: git@github.com:org/repo-b.git
+    path: libs/repo-b
+
+  - url: https://github.com/org/repo-c.git
+    path: tools/repo-c
+
+# Optional settings
+settings:
+  default_branch: main           # default branch name for new branches
+  parallel: true                 # run operations in parallel where possible

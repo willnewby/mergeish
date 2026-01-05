@@ -196,8 +196,7 @@ func pushCmd() *cobra.Command {
 			if force {
 				fmt.Print("Force push? This may overwrite remote changes. [y/N]: ")
 				var response string
-				fmt.Scanln(&response)
-				if response != "y" && response != "Y" {
+				if _, err := fmt.Scanln(&response); err != nil || (response != "y" && response != "Y") {
 					fmt.Println("Aborted")
 					return nil
 				}

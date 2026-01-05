@@ -29,13 +29,15 @@ archives:
   - id: default
     formats:
       - tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Use RawVersion to preserve the + in samver versions
+    name_template: "{{ .ProjectName }}_{{ .RawVersion }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
         formats:
           - zip
     files:
       - DESIGN.md
+      - README.md
       - mergeish.example.yml
 
 checksum:

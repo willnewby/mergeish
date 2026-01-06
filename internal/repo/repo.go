@@ -130,3 +130,23 @@ func (r *Repo) HasStagedChanges() (bool, error) {
 func (r *Repo) Fetch() error {
 	return r.git.Fetch()
 }
+
+// RunGit executes an arbitrary git command and returns stdout, stderr, and error
+func (r *Repo) RunGit(args ...string) (stdout, stderr string, err error) {
+	return r.git.RunRaw(args...)
+}
+
+// GetPR returns PR info for the current branch
+func (r *Repo) GetPR() (*git.PRInfo, error) {
+	return r.git.GetPR()
+}
+
+// CreatePR creates a new pull request
+func (r *Repo) CreatePR(title, body, base string) (*git.PRInfo, error) {
+	return r.git.CreatePR(title, body, base)
+}
+
+// ClosePR closes the pull request for the current branch
+func (r *Repo) ClosePR() error {
+	return r.git.ClosePR()
+}

@@ -239,3 +239,141 @@ func HasErrors(results []Result) bool {
 	}
 	return false
 }
+
+// GitResult represents the result of a raw git command on a single repo
+type GitResult struct {
+	Repo   *repo.Repo
+	Stdout string
+	Stderr string
+	Error  error
+}
+
+// RunGit executes an arbitrary git command on all repos
+func (w *Workspace) RunGit(args []string) []GitResult {
+	results := make([]GitResult, len(w.Repos))
+
+	if w.Parallel {
+		var wg sync.WaitGroup
+		for i, r := range w.Repos {
+			wg.Add(1)
+			go func(i int, r *repo.Repo) {
+				defer wg.Done()
+				if !r.IsCloned() {
+					results[i] = GitResult{Repo: r, Error: fmt.Errorf("not cloned")}
+					return
+				}
+				stdout, stderr, err := r.RunGit(args...)
+				results[i] = GitResult{Repo: r, Stdout: stdout, Stderr: stderr, Error: err}
+			}(i, r)
+		}
+		wg.Wait()
+	} else {
+		for i, r := range w.Repos {
+			if !r.IsCloned() {
+				results[i] = GitResult{Repo: r, Error: fmt.Errorf("not cloned")}
+				continue
+			}
+			stdout, stderr, err := r.RunGit(args...)
+			results[i] = GitResult{Repo: r, Stdout: stdout, Stderr: stderr, Error: err}
+		}
+	}
+
+	return results
+}
+
+// PRResult represents the result of a PR operation on a single repo
+type PRResult struct {
+	Repo     *repo.Repo
+	PR       *git.PRInfo
+	Existed  bool // true if PR already existed (not newly created)
+	Error    error
+}
+
+// GetPRs returns PR status for all repos
+func (w *Workspace) GetPRs() []PRResult {
+	results := make([]PRResult, len(w.Repos))
+
+	if w.Parallel {
+		var wg sync.WaitGroup
+		for i, r := range w.Repos {
+			wg.Add(1)
+			go func(i int, r *repo.Repo) {
+				defer wg.Done()
+				if !r.IsCloned() {
+					results[i] = PRResult{Repo: r, Error: fmt.Errorf("not cloned")}
+					return
+				}
+				pr, err := r.GetPR()
+				results[i] = PRResult{Repo: r, PR: pr, Error: err}
+			}(i, r)
+		}
+		wg.Wait()
+	} else {
+		for i, r := range w.Repos {
+			if !r.IsCloned() {
+				results[i] = PRResult{Repo: r, Error: fmt.Errorf("not cloned")}
+				continue
+			}
+			pr, err := r.GetPR()
+			results[i] = PRResult{Repo: r, PR: pr, Error: err}
+		}
+	}
+
+	return results
+}
+
+// CreatePRs creates PRs for all repos on the current branch, skipping repos that already have a PR
+func (w *Workspace) CreatePRs(title, body, base string) []PRResult {
+	results := make([]PRResult, len(w.Repos))
+
+	createPR := func(i int, r *repo.Repo) {
+		if !r.IsCloned() {
+			results[i] = PRResult{Repo: r, Error: fmt.Errorf("not cloned")}
+			return
+		}
+
+		// Check if PR already exists
+		existingPR, err := r.GetPR()
+		if err != nil {
+			results[i] = PRResult{Repo: r, Error: fmt.Errorf("checking existing PR: %w", err)}
+			return
+		}
+		if existingPR != nil {
+			// PR already exists, return it without error
+			results[i] = PRResult{Repo: r, PR: existingPR, Existed: true, Error: nil}
+			return
+		}
+
+		// Create new PR
+		pr, err := r.CreatePR(title, body, base)
+		results[i] = PRResult{Repo: r, PR: pr, Error: err}
+	}
+
+	if w.Parallel {
+		var wg sync.WaitGroup
+		for i, r := range w.Repos {
+			wg.Add(1)
+			go func(i int, r *repo.Repo) {
+				defer wg.Done()
+				createPR(i, r)
+			}(i, r)
+		}
+		wg.Wait()
+	} else {
+		for i, r := range w.Repos {
+			createPR(i, r)
+		}
+	}
+
+	return results
+}
+
+// ClosePRs closes PRs for all repos on the current branch
+func (w *Workspace) ClosePRs() []Result {
+	return w.forEach(func(r *repo.Repo) error {
+		if !r.IsCloned() {
+			return fmt.Errorf("not cloned")
+		}
+		return r.ClosePR()
+	})
+}

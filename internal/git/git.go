@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -245,4 +246,151 @@ func (g *Git) Fetch() error {
 func (g *Git) IsRepo() bool {
 	_, err := g.run("rev-parse", "--git-dir")
 	return err == nil
+}
+
+// RunRaw executes an arbitrary git command and returns stdout and stderr
+func (g *Git) RunRaw(args ...string) (stdout, stderr string, err error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = g.dir
+
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	err = cmd.Run()
+	return outBuf.String(), errBuf.String(), err
+}
+
+// PRInfo represents information about a pull request
+type PRInfo struct {
+	Number int
+	Title  string
+	URL    string
+	State  string
+	Branch string
+}
+
+// GetPR returns PR info for the current branch, or nil if no PR exists
+func (g *Git) GetPR() (*PRInfo, error) {
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		return nil, err
+	}
+
+	// Use gh cli to check for PR
+	cmd := exec.Command("gh", "pr", "view", "--json", "number,title,url,state,headRefName")
+	cmd.Dir = g.dir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// No PR exists for this branch
+		if strings.Contains(stderr.String(), "no pull requests found") ||
+			strings.Contains(stderr.String(), "Could not resolve") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("gh pr view: %w: %s", err, stderr.String())
+	}
+
+	// Parse JSON response
+	var result struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		URL         string `json:"url"`
+		State       string `json:"state"`
+		HeadRefName string `json:"headRefName"`
+	}
+
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		return nil, fmt.Errorf("parsing gh output: %w", err)
+	}
+
+	return &PRInfo{
+		Number: result.Number,
+		Title:  result.Title,
+		URL:    result.URL,
+		State:  result.State,
+		Branch: branch,
+	}, nil
+}
+
+// CreatePR creates a new pull request for the current branch
+func (g *Git) CreatePR(title, body, base string) (*PRInfo, error) {
+	args := []string{"pr", "create", "--title", title}
+	if body != "" {
+		args = append(args, "--body", body)
+	}
+	if base != "" {
+		args = append(args, "--base", base)
+	}
+
+	cmd := exec.Command("gh", args...)
+	cmd.Dir = g.dir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gh pr create: %w: %s", err, stderr.String())
+	}
+
+	// Get full PR info
+	return g.GetPR()
+}
+
+// ClosePR closes the pull request for the current branch
+func (g *Git) ClosePR() error {
+	cmd := exec.Command("gh", "pr", "close")
+	cmd.Dir = g.dir
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gh pr close: %w: %s", err, stderr.String())
+	}
+
+	return nil
+}
+
+// ListPRs lists all open PRs in the repo
+func (g *Git) ListPRs() ([]PRInfo, error) {
+	cmd := exec.Command("gh", "pr", "list", "--json", "number,title,url,state,headRefName")
+	cmd.Dir = g.dir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gh pr list: %w: %s", err, stderr.String())
+	}
+
+	var results []struct {
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		URL         string `json:"url"`
+		State       string `json:"state"`
+		HeadRefName string `json:"headRefName"`
+	}
+
+	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
+		return nil, fmt.Errorf("parsing gh output: %w", err)
+	}
+
+	prs := make([]PRInfo, len(results))
+	for i, r := range results {
+		prs[i] = PRInfo{
+			Number: r.Number,
+			Title:  r.Title,
+			URL:    r.URL,
+			State:  r.State,
+			Branch: r.HeadRefName,
+		}
+	}
+
+	return prs, nil
 }

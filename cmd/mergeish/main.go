@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/willnewby/mergeish/internal/config"
@@ -36,6 +39,8 @@ func main() {
 		branchCmd(),
 		commitCmd(),
 		statusCmd(),
+		gitCmd(),
+		prCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -491,4 +496,288 @@ func statusCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func gitCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "git [args...]",
+		Short: "Run a git command across all repositories",
+		Long: `Run an arbitrary git command across all configured repositories.
+
+Examples:
+  mergeish git status
+  mergeish git log --oneline -5
+  mergeish git remote -v
+  mergeish git fetch --all`,
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return fmt.Errorf("git command required")
+			}
+
+			ws, err := loadWorkspace()
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Running: git %s\n\n", strings.Join(args, " "))
+			results := ws.RunGit(args)
+
+			hasErrors := false
+			for _, r := range results {
+				fmt.Printf("── %s ──\n", r.Repo.Name())
+
+				if r.Error != nil {
+					hasErrors = true
+					if r.Stderr != "" {
+						fmt.Print(r.Stderr)
+					} else {
+						fmt.Printf("error: %v\n", r.Error)
+					}
+				} else {
+					if r.Stdout != "" {
+						fmt.Print(r.Stdout)
+					}
+					if r.Stderr != "" {
+						fmt.Print(r.Stderr)
+					}
+					if r.Stdout == "" && r.Stderr == "" {
+						fmt.Println("(no output)")
+					}
+				}
+				fmt.Println()
+			}
+
+			if hasErrors {
+				return fmt.Errorf("command failed on some repositories")
+			}
+
+			return nil
+		},
+	}
+}
+
+func prCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "pr",
+		Short: "Manage pull requests across all repositories",
+		Long: `Manage GitHub pull requests across all configured repositories.
+
+Requires the GitHub CLI (gh) to be installed and authenticated.`,
+	}
+
+	cmd.AddCommand(prStatusCmd())
+	cmd.AddCommand(prCreateCmd())
+	cmd.AddCommand(prCloseCmd())
+	cmd.AddCommand(prOpenCmd())
+
+	return cmd
+}
+
+func prStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show PR status for all repositories",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ws, err := loadWorkspace()
+			if err != nil {
+				return err
+			}
+
+			// Check branch consistency
+			branch, consistent, err := ws.CheckBranchConsistency()
+			if err != nil {
+				return err
+			}
+			if !consistent {
+				fmt.Println("⚠ Warning: repositories are on different branches")
+				fmt.Println()
+			} else {
+				fmt.Printf("Branch: %s\n\n", branch)
+			}
+
+			results := ws.GetPRs()
+
+			for _, r := range results {
+				fmt.Printf("%s: ", r.Repo.Name())
+
+				if r.Error != nil {
+					fmt.Printf("error: %v\n", r.Error)
+					continue
+				}
+
+				if r.PR == nil {
+					fmt.Println("no PR")
+				} else {
+					fmt.Printf("#%d %s (%s)\n", r.PR.Number, r.PR.Title, r.PR.State)
+					fmt.Printf("  %s\n", r.PR.URL)
+				}
+			}
+
+			return nil
+		},
+	}
+}
+
+func prCreateCmd() *cobra.Command {
+	var title string
+	var body string
+	var base string
+
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create pull requests for all repositories",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if title == "" {
+				return fmt.Errorf("title required (-t)")
+			}
+
+			ws, err := loadWorkspace()
+			if err != nil {
+				return err
+			}
+
+			// Check branch consistency
+			branch, consistent, err := ws.CheckBranchConsistency()
+			if err != nil {
+				return err
+			}
+			if !consistent {
+				return fmt.Errorf("repositories are on different branches, cannot create PRs")
+			}
+
+			fmt.Printf("Creating PRs for branch %s...\n\n", branch)
+			results := ws.CreatePRs(title, body, base)
+
+			hasErrors := false
+			for _, r := range results {
+				if r.Error != nil {
+					fmt.Printf("  ✗ %s: %v\n", r.Repo.Name(), r.Error)
+					hasErrors = true
+				} else if r.PR != nil {
+					if r.Existed {
+						fmt.Printf("  - %s: already exists %s\n", r.Repo.Name(), r.PR.URL)
+					} else {
+						fmt.Printf("  ✓ %s: %s\n", r.Repo.Name(), r.PR.URL)
+					}
+				}
+			}
+
+			if hasErrors {
+				return fmt.Errorf("failed to create PRs for some repositories")
+			}
+
+			fmt.Println("\nDone!")
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&title, "title", "t", "", "PR title (required)")
+	cmd.Flags().StringVarP(&body, "body", "b", "", "PR body/description")
+	cmd.Flags().StringVar(&base, "base", "", "base branch (default: repo default)")
+
+	return cmd
+}
+
+func prCloseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "close",
+		Short: "Close pull requests for all repositories",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ws, err := loadWorkspace()
+			if err != nil {
+				return err
+			}
+
+			// Check branch consistency
+			branch, consistent, err := ws.CheckBranchConsistency()
+			if err != nil {
+				return err
+			}
+			if !consistent {
+				fmt.Println("⚠ Warning: repositories are on different branches")
+			}
+
+			fmt.Printf("Closing PRs for branch %s...\n\n", branch)
+			results := ws.ClosePRs()
+
+			hasErrors := false
+			for _, r := range results {
+				if r.Error != nil {
+					fmt.Printf("  ✗ %s: %v\n", r.Repo.Name(), r.Error)
+					hasErrors = true
+				} else {
+					fmt.Printf("  ✓ %s\n", r.Repo.Name())
+				}
+			}
+
+			if hasErrors {
+				return fmt.Errorf("failed to close PRs for some repositories")
+			}
+
+			fmt.Println("\nDone!")
+			return nil
+		},
+	}
+}
+
+func prOpenCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "open",
+		Short: "Open pull requests in web browser",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ws, err := loadWorkspace()
+			if err != nil {
+				return err
+			}
+
+			results := ws.GetPRs()
+
+			opened := 0
+			for _, r := range results {
+				if r.Error != nil {
+					fmt.Printf("  ✗ %s: %v\n", r.Repo.Name(), r.Error)
+					continue
+				}
+
+				if r.PR == nil {
+					fmt.Printf("  - %s: no PR\n", r.Repo.Name())
+					continue
+				}
+
+				if err := openBrowser(r.PR.URL); err != nil {
+					fmt.Printf("  ✗ %s: failed to open browser: %v\n", r.Repo.Name(), err)
+					continue
+				}
+
+				fmt.Printf("  ✓ %s: %s\n", r.Repo.Name(), r.PR.URL)
+				opened++
+			}
+
+			if opened == 0 {
+				fmt.Println("\nNo PRs to open")
+			} else {
+				fmt.Printf("\nOpened %d PR(s) in browser\n", opened)
+			}
+
+			return nil
+		},
+	}
+}
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+
+	return cmd.Start()
 }

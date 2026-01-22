@@ -623,6 +623,7 @@ func prCreateCmd() *cobra.Command {
 	var title string
 	var body string
 	var base string
+	var infer bool
 
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -644,6 +645,11 @@ func prCreateCmd() *cobra.Command {
 			}
 			if !consistent {
 				return fmt.Errorf("repositories are on different branches, cannot create PRs")
+			}
+
+			// Infer body from commits if requested
+			if infer && body == "" {
+				body = inferBodyFromCommits(ws, base)
 			}
 
 			fmt.Printf("Creating PRs for branch %s...\n\n", branch)
@@ -675,8 +681,47 @@ func prCreateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&title, "title", "t", "", "PR title (required)")
 	cmd.Flags().StringVarP(&body, "body", "b", "", "PR body/description")
 	cmd.Flags().StringVar(&base, "base", "", "base branch (default: repo default)")
+	cmd.Flags().BoolVar(&infer, "infer", false, "infer PR body from commit messages")
 
 	return cmd
+}
+
+// inferBodyFromCommits generates a PR body from commit messages across all repos
+func inferBodyFromCommits(ws *workspace.Workspace, base string) string {
+	var allCommits []string
+	seen := make(map[string]bool)
+
+	for _, r := range ws.Repos {
+		if !r.IsCloned() {
+			continue
+		}
+
+		commits, err := r.GetBranchCommits(base)
+		if err != nil {
+			continue
+		}
+
+		for _, commit := range commits {
+			if commit != "" && !seen[commit] {
+				seen[commit] = true
+				allCommits = append(allCommits, commit)
+			}
+		}
+	}
+
+	if len(allCommits) == 0 {
+		return ""
+	}
+
+	var body strings.Builder
+	body.WriteString("## Changes\n\n")
+	for _, commit := range allCommits {
+		body.WriteString("- ")
+		body.WriteString(commit)
+		body.WriteString("\n")
+	}
+
+	return body.String()
 }
 
 func prCloseCmd() *cobra.Command {

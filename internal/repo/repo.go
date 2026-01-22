@@ -150,3 +150,8 @@ func (r *Repo) CreatePR(title, body, base string) (*git.PRInfo, error) {
 func (r *Repo) ClosePR() error {
 	return r.git.ClosePR()
 }
+
+// GetBranchCommits returns commit messages for the current branch
+func (r *Repo) GetBranchCommits(base string) ([]string, error) {
+	return r.git.GetBranchCommits(base)
+}

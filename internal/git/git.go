@@ -356,6 +356,33 @@ func (g *Git) ClosePR() error {
 	return nil
 }
 
+// GetBranchCommits returns commit messages for the current branch compared to a base branch
+// If base is empty, it tries to find the merge base with origin/main or origin/master
+func (g *Git) GetBranchCommits(base string) ([]string, error) {
+	if base == "" {
+		// Try to find the default base branch
+		if _, err := g.run("rev-parse", "--verify", "origin/main"); err == nil {
+			base = "origin/main"
+		} else if _, err := g.run("rev-parse", "--verify", "origin/master"); err == nil {
+			base = "origin/master"
+		} else {
+			return nil, fmt.Errorf("could not determine base branch")
+		}
+	}
+
+	// Get commits from base..HEAD
+	output, err := g.run("log", "--pretty=format:%s", base+"..HEAD")
+	if err != nil {
+		return nil, err
+	}
+
+	if output == "" {
+		return nil, nil
+	}
+
+	return strings.Split(output, "\n"), nil
+}
+
 // ListPRs lists all open PRs in the repo
 func (g *Git) ListPRs() ([]PRInfo, error) {
 	cmd := exec.Command("gh", "pr", "list", "--json", "number,title,url,state,headRefName")

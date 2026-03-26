@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -33,6 +35,7 @@ func main() {
 
 	rootCmd.AddCommand(
 		initCmd(),
+		newCmd(),
 		cloneCmd(),
 		pullCmd(),
 		pushCmd(),
@@ -95,6 +98,109 @@ func initCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "new <name>",
+		Short: "Create a new workspace by copying config files",
+		Long: `Create a new workspace directory at ../<name>/ relative to the current workspace root.
+
+Copies the mergeish config file and any additional files listed in workspace.new.files.
+Then runs any commands listed in workspace.new.commands from the new workspace directory.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+
+			configFilePath, err := getConfigPath()
+			if err != nil {
+				return err
+			}
+
+			root := filepath.Dir(configFilePath)
+			destDir := filepath.Join(root, "..", name)
+
+			// Check destination doesn't already exist
+			if _, err := os.Stat(destDir); err == nil {
+				return fmt.Errorf("directory %s already exists", destDir)
+			}
+
+			if err := os.MkdirAll(destDir, 0755); err != nil {
+				return fmt.Errorf("creating directory: %w", err)
+			}
+
+			// Always copy the config file
+			configBase := filepath.Base(configFilePath)
+			if err := copyFile(configFilePath, filepath.Join(destDir, configBase)); err != nil {
+				return fmt.Errorf("copying %s: %w", configBase, err)
+			}
+			fmt.Printf("  ✓ %s\n", configBase)
+
+			// Load config to get workspace.new.files
+			cfg, err := config.Load(configFilePath)
+			if err != nil {
+				return err
+			}
+
+			for _, f := range cfg.Workspace.New.Files {
+				src := filepath.Join(root, f)
+				dst := filepath.Join(destDir, f)
+
+				// Create parent directories if needed
+				if dir := filepath.Dir(dst); dir != destDir {
+					if err := os.MkdirAll(dir, 0755); err != nil {
+						fmt.Printf("  ✗ %s: %v\n", f, err)
+						continue
+					}
+				}
+
+				if err := copyFile(src, dst); err != nil {
+					fmt.Printf("  ✗ %s: %v\n", f, err)
+					continue
+				}
+				fmt.Printf("  ✓ %s\n", f)
+			}
+
+			fmt.Printf("\nCreated workspace at %s\n", destDir)
+
+			// Run post-creation commands
+			for _, c := range cfg.Workspace.New.Commands {
+				fmt.Printf("\nRunning: %s\n", c)
+				parts := strings.Fields(c)
+				run := exec.Command(parts[0], parts[1:]...)
+				run.Dir = destDir
+				run.Stdout = os.Stdout
+				run.Stderr = os.Stderr
+				if err := run.Run(); err != nil {
+					return fmt.Errorf("command %q failed: %w", c, err)
+				}
+			}
+
+			return nil
+		},
+	}
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func cloneCmd() *cobra.Command {

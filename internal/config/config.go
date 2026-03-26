@@ -22,10 +22,22 @@ type Settings struct {
 	Parallel      bool   `yaml:"parallel"`
 }
 
+// WorkspaceNewConfig represents settings for creating new workspaces
+type WorkspaceNewConfig struct {
+	Files    []string `yaml:"files"`
+	Commands []string `yaml:"commands"`
+}
+
+// WorkspaceConfig represents workspace-level configuration
+type WorkspaceConfig struct {
+	New WorkspaceNewConfig `yaml:"new"`
+}
+
 // Config represents the mergeish.yml configuration file
 type Config struct {
-	Repos    []RepoConfig `yaml:"repos"`
-	Settings Settings     `yaml:"settings"`
+	Repos     []RepoConfig    `yaml:"repos"`
+	Settings  Settings        `yaml:"settings"`
+	Workspace WorkspaceConfig `yaml:"workspace"`
 }
 
 // DefaultConfig returns a config with default settings

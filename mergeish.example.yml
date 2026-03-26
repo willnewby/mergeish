@@ -17,3 +17,11 @@ repos:
 settings:
   default_branch: main           # default branch name for new branches
   parallel: true                 # run operations in parallel where possible
+
+# Workspace settings
+workspace:
+  new:
+    files:                         # files to copy when running 'mergeish new'
+      - CLAUDE.md
+    commands:                      # commands to run after files are copied
+      - mergeish clone

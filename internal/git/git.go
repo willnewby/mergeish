@@ -356,18 +356,27 @@ func (g *Git) ClosePR() error {
 	return nil
 }
 
+// resolveBase returns the base ref to compare against.
+// If base is empty, it tries origin/main then origin/master.
+func (g *Git) resolveBase(base string) (string, error) {
+	if base != "" {
+		return base, nil
+	}
+	if _, err := g.run("rev-parse", "--verify", "origin/main"); err == nil {
+		return "origin/main", nil
+	}
+	if _, err := g.run("rev-parse", "--verify", "origin/master"); err == nil {
+		return "origin/master", nil
+	}
+	return "", fmt.Errorf("could not determine base branch")
+}
+
 // GetBranchCommits returns commit messages for the current branch compared to a base branch
 // If base is empty, it tries to find the merge base with origin/main or origin/master
 func (g *Git) GetBranchCommits(base string) ([]string, error) {
-	if base == "" {
-		// Try to find the default base branch
-		if _, err := g.run("rev-parse", "--verify", "origin/main"); err == nil {
-			base = "origin/main"
-		} else if _, err := g.run("rev-parse", "--verify", "origin/master"); err == nil {
-			base = "origin/master"
-		} else {
-			return nil, fmt.Errorf("could not determine base branch")
-		}
+	base, err := g.resolveBase(base)
+	if err != nil {
+		return nil, err
 	}
 
 	// Get commits from base..HEAD
@@ -381,6 +390,16 @@ func (g *Git) GetBranchCommits(base string) ([]string, error) {
 	}
 
 	return strings.Split(output, "\n"), nil
+}
+
+// GetBranchDiff returns the diff (stat plus patch) of the current branch against a base branch
+func (g *Git) GetBranchDiff(base string) (string, error) {
+	base, err := g.resolveBase(base)
+	if err != nil {
+		return "", err
+	}
+
+	return g.run("diff", "--stat", "--patch", base+"...HEAD")
 }
 
 // ListPRs lists all open PRs in the repo

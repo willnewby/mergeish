@@ -155,3 +155,8 @@ func (r *Repo) ClosePR() error {
 func (r *Repo) GetBranchCommits(base string) ([]string, error) {
 	return r.git.GetBranchCommits(base)
 }
+
+// GetBranchDiff returns the diff of the current branch against a base branch
+func (r *Repo) GetBranchDiff(base string) (string, error) {
+	return r.git.GetBranchDiff(base)
+}

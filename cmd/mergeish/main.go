@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/willnewby/mergeish/internal/ai"
 	"github.com/willnewby/mergeish/internal/config"
 	"github.com/willnewby/mergeish/internal/workspace"
 )
@@ -730,13 +731,14 @@ func prCreateCmd() *cobra.Command {
 	var body string
 	var base string
 	var infer bool
+	var useAI bool
 
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create pull requests for all repositories",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if title == "" {
-				return fmt.Errorf("title required (-t)")
+			if title == "" && !useAI {
+				return fmt.Errorf("title required (-t), or use --ai to generate one")
 			}
 
 			ws, err := loadWorkspace()
@@ -751,6 +753,20 @@ func prCreateCmd() *cobra.Command {
 			}
 			if !consistent {
 				return fmt.Errorf("repositories are on different branches, cannot create PRs")
+			}
+
+			// Generate title/body with an AI CLI if requested
+			if useAI && (title == "" || body == "") {
+				genTitle, genBody, err := generatePRWithAI(ws, branch, base)
+				if err != nil {
+					return err
+				}
+				if title == "" {
+					title = genTitle
+				}
+				if body == "" {
+					body = genBody
+				}
 			}
 
 			// Infer body from commits if requested
@@ -784,12 +800,76 @@ func prCreateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&title, "title", "t", "", "PR title (required)")
+	cmd.Flags().StringVarP(&title, "title", "t", "", "PR title (required unless --ai)")
 	cmd.Flags().StringVarP(&body, "body", "b", "", "PR body/description")
 	cmd.Flags().StringVar(&base, "base", "", "base branch (default: repo default)")
 	cmd.Flags().BoolVar(&infer, "infer", false, "infer PR body from commit messages")
+	cmd.Flags().BoolVar(&useAI, "ai", false, "generate PR title and body using an AI CLI (claude or pi)")
 
 	return cmd
+}
+
+// maxDiffChars caps how much of each repo's diff is sent to the AI CLI
+const maxDiffChars = 20000
+
+// generatePRWithAI generates a PR title and body from branch context using an AI CLI
+func generatePRWithAI(ws *workspace.Workspace, branch, base string) (string, string, error) {
+	cli, err := ai.FindCLI()
+	if err != nil {
+		return "", "", err
+	}
+
+	context := buildPRContext(ws, branch, base)
+	if context == "" {
+		return "", "", fmt.Errorf("no commits or diffs found to generate PR content from")
+	}
+
+	fmt.Printf("Generating PR title and body with %s...\n", cli)
+	content, err := ai.GeneratePR(cli, context)
+	if err != nil {
+		return "", "", err
+	}
+
+	fmt.Printf("  title: %s\n\n", content.Title)
+	return content.Title, content.Body, nil
+}
+
+// buildPRContext collects branch name, commit messages, and diffs across all repos
+func buildPRContext(ws *workspace.Workspace, branch, base string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Branch: %s\n", branch)
+
+	hasContent := false
+	for _, r := range ws.Repos {
+		if !r.IsCloned() {
+			continue
+		}
+
+		commits, err := r.GetBranchCommits(base)
+		if err != nil || len(commits) == 0 {
+			continue
+		}
+		hasContent = true
+
+		fmt.Fprintf(&sb, "\n## Repository: %s\n\nCommits:\n", r.Name())
+		for _, c := range commits {
+			fmt.Fprintf(&sb, "- %s\n", c)
+		}
+
+		diff, err := r.GetBranchDiff(base)
+		if err != nil || diff == "" {
+			continue
+		}
+		if len(diff) > maxDiffChars {
+			diff = diff[:maxDiffChars] + "\n... (diff truncated)"
+		}
+		fmt.Fprintf(&sb, "\nDiff:\n```\n%s\n```\n", diff)
+	}
+
+	if !hasContent {
+		return ""
+	}
+	return sb.String()
 }
 
 // inferBodyFromCommits generates a PR body from commit messages across all repos

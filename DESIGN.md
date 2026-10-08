@@ -52,6 +52,27 @@ mergeish clone [--config <path>]
 - Checks out the default branch on all repos
 - Fails fast or continues on error (configurable)
 
+### `mergeish new` / `rm` / `ls`
+
+Manage worktree workspaces.
+
+```
+mergeish new <branch> [--from <url>]
+mergeish rm <branch> [-D] [-f]
+mergeish ls
+```
+
+- Each repo URL gets one bare store clone at `~/.mergeish/repos/<host>/<owner>/<repo>.git`
+  (`git init --bare` + fetch, so the store holds remote-tracking refs and no local branches of its own)
+- `new` fetches the base repo's store and adds a worktree for `<branch>` at
+  `~/.mergeish/workspaces/<branch>`, then runs the worktree-aware clone inside it
+- `clone` detects a worktree workspace (the root's git common dir is inside the store) and adds
+  a worktree per repo on the root's branch instead of cloning
+- Branch resolution: existing local branch → tracked remote branch → new branch from the
+  remote default branch
+- `rm` checks every worktree before removing any, removes repos before the root (removing the
+  root deletes its git-ignored repo directories), and keeps the root if any repo fails
+
 ### `mergeish pull`
 
 Pull latest changes from remote for all repositories.
@@ -129,6 +150,8 @@ mergeish/
 │   │   └── git.go               # Git operations wrapper
 │   ├── repo/
 │   │   └── repo.go              # Repository management
+│   ├── store/
+│   │   └── store.go             # Bare clone store and worktrees
 │   └── workspace/
 │       └── workspace.go         # Workspace orchestration
 ├── mergeish.yml                  # Example config
@@ -143,6 +166,8 @@ mergeish/
 **Git (`internal/git`)**: Wraps git CLI commands. Provides typed responses and error handling. Does not maintain state.
 
 **Repo (`internal/repo`)**: Represents a single repository. Combines config with git operations.
+
+**Store (`internal/store`)**: Manages the bare clones under `~/.mergeish/repos` and the worktrees checked out from them.
 
 **Workspace (`internal/workspace`)**: Orchestrates operations across all repos. Handles parallel execution and aggregates results.
 

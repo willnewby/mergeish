@@ -8,6 +8,7 @@ import (
 	"github.com/willnewby/mergeish/internal/config"
 	"github.com/willnewby/mergeish/internal/git"
 	"github.com/willnewby/mergeish/internal/repo"
+	"github.com/willnewby/mergeish/internal/store"
 )
 
 // Result represents the result of an operation on a single repo
@@ -64,6 +65,27 @@ func (w *Workspace) Clone() []Result {
 			return nil // Already cloned
 		}
 		return r.Clone()
+	})
+}
+
+// IsWorktree reports whether the workspace root is a worktree of a mergeish store.
+// Worktree workspaces check out their repos as worktrees instead of full clones.
+func (w *Workspace) IsWorktree() bool {
+	return store.StoreFor(w.Root) != ""
+}
+
+// RootBranch returns the branch checked out at the workspace root
+func (w *Workspace) RootBranch() (string, error) {
+	return git.New(w.Root).CurrentBranch()
+}
+
+// CloneWorktrees checks out branch in every repo as a worktree of its store
+func (w *Workspace) CloneWorktrees(branch string) []Result {
+	return w.forEach(func(r *repo.Repo) error {
+		if r.IsCloned() {
+			return nil // Already cloned
+		}
+		return r.CloneWorktree(branch, w.Config.Settings.DefaultBranch)
 	})
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/willnewby/mergeish/internal/config"
 	"github.com/willnewby/mergeish/internal/git"
+	"github.com/willnewby/mergeish/internal/store"
 )
 
 // Repo represents a managed git repository
@@ -37,9 +38,14 @@ func (r *Repo) Exists() bool {
 	return err == nil && info.IsDir()
 }
 
-// IsCloned checks if the repo has been cloned
+// IsCloned checks if the repo has been cloned.
+// Requires a .git entry (a directory, or a file for worktrees) so that an empty
+// directory nested inside another repo is not mistaken for a clone.
 func (r *Repo) IsCloned() bool {
-	return r.Exists() && r.git.IsRepo()
+	if _, err := os.Stat(filepath.Join(r.FullPath, ".git")); err != nil {
+		return false
+	}
+	return r.git.IsRepo()
 }
 
 // Clone clones the repository
@@ -51,6 +57,24 @@ func (r *Repo) Clone() error {
 	}
 
 	return git.Clone(r.Config.URL, r.FullPath)
+}
+
+// CloneWorktree checks out branch into the repo path as a worktree of its store,
+// creating or fetching the store as needed
+func (r *Repo) CloneWorktree(branch, fallbackBase string) error {
+	storePath, err := store.Ensure(r.Config.URL)
+	if err != nil {
+		return err
+	}
+	return store.AddWorktree(storePath, r.FullPath, branch, fallbackBase)
+}
+
+// Store returns the store this repo is a worktree of, or "" if it is a plain clone
+func (r *Repo) Store() string {
+	if !r.IsCloned() {
+		return ""
+	}
+	return store.StoreFor(r.FullPath)
 }
 
 // Status returns the repository status

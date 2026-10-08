@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/willnewby/mergeish/internal/ai"
 	"github.com/willnewby/mergeish/internal/config"
+	"github.com/willnewby/mergeish/internal/store"
+	"github.com/willnewby/mergeish/internal/tern"
 	"github.com/willnewby/mergeish/internal/workspace"
 )
 
@@ -37,6 +38,8 @@ func main() {
 	rootCmd.AddCommand(
 		initCmd(),
 		newCmd(),
+		rmCmd(),
+		lsCmd(),
 		cloneCmd(),
 		pullCmd(),
 		pushCmd(),
@@ -101,71 +104,72 @@ func initCmd() *cobra.Command {
 	}
 }
 
-func newCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "new <name>",
-		Short: "Create a new workspace by copying config files",
-		Long: `Create a new workspace directory at ../<name>/ relative to the current workspace root.
+const (
+	// defaultBaseRepo is the workspace repo checked out by 'mergeish new'
+	defaultBaseRepo = "git@github.com:willnewby/shinfra.git"
+	// baseRepoEnv overrides defaultBaseRepo
+	baseRepoEnv = "MERGEISH_BASE_REPO"
+)
 
-Copies the mergeish config file and any additional files listed in workspace.new.files.
-Then runs any commands listed in workspace.new.commands from the new workspace directory.`,
+func newCmd() *cobra.Command {
+	var from string
+	var noTern bool
+
+	cmd := &cobra.Command{
+		Use:   "new <branch>",
+		Short: "Create a worktree workspace with matching branches across all repos",
+		Long: `Create a new workspace at ~/.mergeish/workspaces/<branch>/ (or $MERGEISH_HOME/workspaces/).
+
+The base repo (default: ` + defaultBaseRepo + `, override with --from or $` + baseRepoEnv + `)
+is checked out there as a git worktree on <branch>, then every repo in its mergeish.yml is
+checked out inside it as a worktree on the same branch. Worktrees share bare clones kept
+under ~/.mergeish/repos/, so only the first workspace pays the full clone cost.
+
+An existing local or remote <branch> is checked out; otherwise it is created from the
+remote's default branch. Commands listed in workspace.new.commands then run from the
+new workspace directory.
+
+If tern is installed, a tern session named after the workspace is created with an agent
+block (tern's agent_command) and a terminal block, both in the workspace directory.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
+			branch := args[0]
 
-			configFilePath, err := getConfigPath()
+			if from == "" {
+				from = os.Getenv(baseRepoEnv)
+			}
+			if from == "" {
+				from = defaultBaseRepo
+			}
+
+			destDir, err := store.WorkspaceDir(branch)
 			if err != nil {
 				return err
 			}
-
-			root := filepath.Dir(configFilePath)
-			destDir := filepath.Join(root, "..", name)
-
-			// Check destination doesn't already exist
 			if _, err := os.Stat(destDir); err == nil {
-				return fmt.Errorf("directory %s already exists", destDir)
+				return fmt.Errorf("workspace %s already exists", destDir)
 			}
 
-			if err := os.MkdirAll(destDir, 0755); err != nil {
-				return fmt.Errorf("creating directory: %w", err)
-			}
-
-			// Always copy the config file
-			configBase := filepath.Base(configFilePath)
-			if err := copyFile(configFilePath, filepath.Join(destDir, configBase)); err != nil {
-				return fmt.Errorf("copying %s: %w", configBase, err)
-			}
-			fmt.Printf("  ✓ %s\n", configBase)
-
-			// Load config to get workspace.new.files
-			cfg, err := config.Load(configFilePath)
+			fmt.Printf("Fetching %s...\n", from)
+			storePath, err := store.Ensure(from)
 			if err != nil {
 				return err
 			}
-
-			for _, f := range cfg.Workspace.New.Files {
-				src := filepath.Join(root, f)
-				dst := filepath.Join(destDir, f)
-
-				// Create parent directories if needed
-				if dir := filepath.Dir(dst); dir != destDir {
-					if err := os.MkdirAll(dir, 0755); err != nil {
-						fmt.Printf("  ✗ %s: %v\n", f, err)
-						continue
-					}
-				}
-
-				if err := copyFile(src, dst); err != nil {
-					fmt.Printf("  ✗ %s: %v\n", f, err)
-					continue
-				}
-				fmt.Printf("  ✓ %s\n", f)
+			if err := store.AddWorktree(storePath, destDir, branch, config.DefaultConfig().Settings.DefaultBranch); err != nil {
+				return err
 			}
+			fmt.Printf("  ✓ %s\n\n", destDir)
 
-			fmt.Printf("\nCreated workspace at %s\n", destDir)
+			ws, err := workspace.Load(filepath.Join(destDir, config.DefaultConfigFile))
+			if err != nil {
+				return err
+			}
+			if err := cloneWorkspace(ws); err != nil {
+				return err
+			}
 
 			// Run post-creation commands
-			for _, c := range cfg.Workspace.New.Commands {
+			for _, c := range ws.Config.Workspace.New.Commands {
 				fmt.Printf("\nRunning: %s\n", c)
 				parts := strings.Fields(c)
 				run := exec.Command(parts[0], parts[1:]...)
@@ -177,64 +181,274 @@ Then runs any commands listed in workspace.new.commands from the new workspace d
 				}
 			}
 
+			if !noTern {
+				createTernSession(filepath.Base(destDir), destDir)
+			}
+
+			fmt.Printf("\nWorkspace ready: %s\n", destDir)
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&from, "from", "", "base repo URL (default: $"+baseRepoEnv+" or "+defaultBaseRepo+")")
+	cmd.Flags().BoolVar(&noTern, "no-tern", false, "don't create a tern session")
+	return cmd
 }
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	info, err := in.Stat()
-	if err != nil {
-		return err
+// createTernSession opens a tern session for a workspace. Failures are reported
+// but don't fail the command, since the workspace itself is already created.
+func createTernSession(name, dir string) {
+	if !tern.Available() {
+		return
 	}
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	fmt.Printf("\nCreating tern session %s...\n", name)
+	exists, err := tern.SessionExists(name)
 	if err != nil {
-		return err
+		fmt.Printf("  ✗ %v\n", err)
+		return
 	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
+	if exists {
+		fmt.Printf("  - session %s already exists\n", name)
+		return
+	}
+	if err := tern.NewWorkspaceSession(name, dir); err != nil {
+		fmt.Printf("  ✗ %v\n", err)
+		return
+	}
+	fmt.Printf("  ✓ agent (%s) and terminal blocks\n", tern.AgentCommand())
 }
 
-func cloneCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "clone",
-		Short: "Clone all configured repositories",
+func rmCmd() *cobra.Command {
+	var force bool
+	var deleteBranch bool
+
+	cmd := &cobra.Command{
+		Use:   "rm <branch>",
+		Short: "Remove a worktree workspace created by 'mergeish new'",
+		Long: `Remove the workspace for <branch>: every repo worktree inside it, then the workspace itself.
+
+Refuses if any repo has uncommitted changes, unless --force is given.
+Also ends the workspace's tern session, if there is one.
+With --delete-branch, also deletes the branch from each repo's store; branches with
+commits that are not on the remote are kept unless --force is given.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ws, err := loadWorkspace()
+			dir, err := store.WorkspaceDir(args[0])
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(dir); err != nil {
+				return fmt.Errorf("no workspace for %s at %s", args[0], dir)
+			}
+
+			rootStore := store.StoreFor(dir)
+			if rootStore == "" {
+				return fmt.Errorf("%s is not a mergeish worktree workspace", dir)
+			}
+
+			ws, err := workspace.Load(filepath.Join(dir, config.DefaultConfigFile))
 			if err != nil {
 				return err
 			}
 
-			fmt.Println("Cloning repositories...")
-			results := ws.Clone()
+			type target struct {
+				name, dir, store, branch string
+			}
 
-			hasErrors := false
-			for _, r := range results {
-				if r.Error != nil {
-					fmt.Printf("  ✗ %s: %v\n", r.Repo.Name(), r.Error)
-					hasErrors = true
-				} else if r.Repo.IsCloned() {
-					fmt.Printf("  ✓ %s\n", r.Repo.Name())
+			// Collect worktrees, deepest (repos) first and the workspace root last,
+			// since removing the root also deletes the git-ignored repo directories in it
+			var targets []target
+			for _, r := range ws.Repos {
+				if !r.IsCloned() {
+					continue
+				}
+				s := r.Store()
+				if s == "" {
+					return fmt.Errorf("%s is a full clone, not a worktree; remove it manually first", r.Name())
+				}
+				branch, err := r.CurrentBranch()
+				if err != nil {
+					return fmt.Errorf("%s: %w", r.Name(), err)
+				}
+				targets = append(targets, target{r.Name(), r.FullPath, s, branch})
+			}
+			rootBranch, err := ws.RootBranch()
+			if err != nil {
+				return err
+			}
+			targets = append(targets, target{filepath.Base(dir), dir, rootStore, rootBranch})
+
+			// Check everything before removing anything
+			if !force {
+				var problems []string
+				for _, t := range targets {
+					dirty, err := store.IsDirty(t.dir)
+					if err != nil {
+						return fmt.Errorf("%s: %w", t.name, err)
+					}
+					if dirty {
+						problems = append(problems, fmt.Sprintf("%s: uncommitted changes", t.name))
+					}
+					if deleteBranch && store.HasUnpushedCommits(t.store, t.branch) {
+						problems = append(problems, fmt.Sprintf("%s: %s has unpushed commits", t.name, t.branch))
+					}
+				}
+				if len(problems) > 0 {
+					for _, p := range problems {
+						fmt.Printf("  ✗ %s\n", p)
+					}
+					return fmt.Errorf("refusing to remove workspace (use --force to discard)")
 				}
 			}
 
-			if hasErrors {
-				return fmt.Errorf("some repositories failed to clone")
+			fmt.Printf("Removing workspace %s...\n", dir)
+			for i, t := range targets {
+				if err := store.RemoveWorktree(t.store, t.dir, force); err != nil {
+					fmt.Printf("  ✗ %s: %v\n", t.name, err)
+					if i < len(targets)-1 {
+						return fmt.Errorf("failed to remove some repositories; workspace root kept")
+					}
+					return fmt.Errorf("failed to remove workspace root")
+				}
+				fmt.Printf("  ✓ %s\n", t.name)
+			}
+
+			if tern.Available() {
+				name := filepath.Base(dir)
+				if exists, _ := tern.SessionExists(name); exists {
+					if err := tern.KillSession(name); err != nil {
+						fmt.Printf("  ✗ tern session %s: %v\n", name, err)
+					} else {
+						fmt.Printf("  ✓ tern session %s\n", name)
+					}
+				}
+			}
+
+			if deleteBranch {
+				fmt.Println("\nDeleting branches...")
+				hasErrors := false
+				for _, t := range targets {
+					if err := store.DeleteBranch(t.store, t.branch); err != nil {
+						fmt.Printf("  ✗ %s: %v\n", t.name, err)
+						hasErrors = true
+					} else {
+						fmt.Printf("  ✓ %s: %s\n", t.name, t.branch)
+					}
+				}
+				if hasErrors {
+					return fmt.Errorf("failed to delete some branches")
+				}
 			}
 
 			fmt.Println("Done!")
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "remove even with uncommitted changes or unpushed commits")
+	cmd.Flags().BoolVarP(&deleteBranch, "delete-branch", "D", false, "also delete the branch from each repo")
+	return cmd
+}
+
+func lsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ls",
+		Short: "List worktree workspaces created by 'mergeish new'",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir, err := store.WorkspacesDir()
+			if err != nil {
+				return err
+			}
+
+			entries, err := os.ReadDir(dir)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+
+			found := 0
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				path := filepath.Join(dir, e.Name())
+				if store.StoreFor(path) == "" {
+					fmt.Printf("  %s (not a worktree)\n", path)
+					continue
+				}
+				ws, err := workspace.Load(filepath.Join(path, config.DefaultConfigFile))
+				if err != nil {
+					fmt.Printf("  %s: error: %v\n", path, err)
+					continue
+				}
+				branch, err := ws.RootBranch()
+				if err != nil {
+					fmt.Printf("  %s: error: %v\n", path, err)
+					continue
+				}
+				fmt.Printf("  %s  %s\n", branch, path)
+				found++
+			}
+
+			if found == 0 {
+				fmt.Println("No workspaces. Create one with 'mergeish new <branch>'")
+			}
+			return nil
+		},
+	}
+}
+
+func cloneCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "clone",
+		Short: "Clone all configured repositories",
+		Long: `Clone all configured repositories into the workspace.
+
+In a workspace created by 'mergeish new' (the workspace root is a git worktree),
+repos are checked out as worktrees on the workspace's branch instead of cloned.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ws, err := loadWorkspace()
+			if err != nil {
+				return err
+			}
+
+			return cloneWorkspace(ws)
+		},
+	}
+}
+
+// cloneWorkspace clones every repo, or checks each out as a worktree
+// on the root's branch when the workspace is itself a worktree
+func cloneWorkspace(ws *workspace.Workspace) error {
+	var results []workspace.Result
+	if ws.IsWorktree() {
+		branch, err := ws.RootBranch()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Checking out %s in all repositories...\n", branch)
+		results = ws.CloneWorktrees(branch)
+	} else {
+		fmt.Println("Cloning repositories...")
+		results = ws.Clone()
+	}
+
+	hasErrors := false
+	for _, r := range results {
+		if r.Error != nil {
+			fmt.Printf("  ✗ %s: %v\n", r.Repo.Name(), r.Error)
+			hasErrors = true
+		} else if r.Repo.IsCloned() {
+			fmt.Printf("  ✓ %s\n", r.Repo.Name())
+		}
+	}
+
+	if hasErrors {
+		return fmt.Errorf("some repositories failed to clone")
+	}
+
+	fmt.Println("Done!")
+	return nil
 }
 
 func pullCmd() *cobra.Command {

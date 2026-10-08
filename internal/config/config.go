@@ -24,7 +24,6 @@ type Settings struct {
 
 // WorkspaceNewConfig represents settings for creating new workspaces
 type WorkspaceNewConfig struct {
-	Files    []string `yaml:"files"`
 	Commands []string `yaml:"commands"`
 }
 

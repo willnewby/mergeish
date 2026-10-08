@@ -21,7 +21,5 @@ settings:
 # Workspace settings
 workspace:
   new:
-    files:                         # files to copy when running 'mergeish new'
-      - CLAUDE.md
-    commands:                      # commands to run after files are copied
-      - mergeish clone
+    commands:                      # commands to run after 'mergeish new' creates a workspace
+      - direnv allow
